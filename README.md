@@ -1,2 +1,2 @@
 # scala-rpc
-Scala based nats functions doing rpc and stuff.
+Scala based rpc functions over nats (and local for testing).

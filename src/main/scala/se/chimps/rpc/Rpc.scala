@@ -1,84 +1,53 @@
 package se.chimps.rpc
 
-import io.nats.client.{Dispatcher, Message, MessageHandler}
-import se.chimps.rpc.util.Json
+import se.chimps.rpc.util.JsonUtil
 
 import scala.concurrent.{ExecutionContext, Future}
 
-case class Rpc(builder:Builder, executionContext: ExecutionContext) extends Json {
-	implicit val ec = executionContext
+trait RpcServer {
+	def registerWorker(topic:String, func:Worker)
+	def registerEventer(topic:String, func:Eventer)
+	def start(opts:Option[Settings] = None)
+	def stop()
+}
 
-	private var subscriptions:Seq[Subscription] = Seq()
+trait RpcClient {
+	def request(topic:String, msg:Message):Future[Message]
+	def trigger(topic:String, msg:Message):Unit
+}
 
-	def start():Unit = {
-		builder.workers.foreach(w => {
-			val d = builder.nats.createDispatcher(worker(w.handler))
-			val s = w.group match {
-				case Some(g) => d.subscribe(w.topic, g)
-				case None => d.subscribe(w.topic)
-			}
-			subscriptions = subscriptions ++ Seq(Subscription(w.topic, s))
-		})
+case class Message(metadata:Map[String, String], body:String) {
+	def withBody[T](body:T):Message = copy(body = JsonUtil.stringify(body))
+	def withPlainBody(body:String):Message = copy(body = body)
+	def readBody[T]()(implicit m:Manifest[T]):T = JsonUtil.parse[T](body)
+	def addHeader(key:String, value:String):Message = copy(metadata = metadata ++ Map(key -> value))
+}
 
-		builder.events.foreach(e => {
-			val d = builder.nats.createDispatcher(event(e.handler))
-			val s = e.group match {
-				case Some(g) => d.subscribe(e.topic, g)
-				case None => d.subscribe(e.topic)
-			}
+object MessageBuilder {
+	def newSuccess(headers:Map[String, String] = Map()):Message = Message(headers ++ Map("result" -> "success"), "")
+	def newError(msg:String):Message = Message(Map("result" -> "error"), JsonUtil.stringify(ErrorDTO(msg)))
+	def newEmpty():Message = Message(Map(), "")
+}
 
-			subscriptions = subscriptions ++ Seq(Subscription(e.topic, s))
-		})
+case class ErrorDTO(msg:String)
 
-		builder.raw.foreach(r => {
-			val d = builder.nats.createDispatcher(raw(r.handler))
-			val s = r.group match {
-				case Some(g) => d.subscribe(r.topic, g)
-				case None => d.subscribe(r.topic)
-			}
+trait Worker extends (Message => Future[Message])
+trait Eventer extends (Message => Unit)
 
-			subscriptions = subscriptions ++ Seq(Subscription(r.topic, s))
-		})
-
-		builder.rawResponse.foreach(r => {
-			val d = builder.nats.createDispatcher(rawResponse(r.handler))
-			val s = r.group match {
-				case Some(g) => d.subscribe(r.topic, g)
-				case None => d.subscribe(r.topic)
-			}
-
-			subscriptions = subscriptions ++ Seq(Subscription(r.topic, s))
-		})
+object Worker {
+	def apply(func:(Message)=>Future[Message]):Worker = {
+		(msg:Message) => func(msg)
 	}
 
-	def stop():Unit = {
-		subscriptions.foreach(d => d.dispatcher.unsubscribe(d.topic))
-		subscriptions = Seq()
-	}
-
-	private def worker(func:(Request)=>Future[Response]):MessageHandler = { msg =>
-		val req = fromJson[Request](msg.getData)
-		func(req)
-	    .recover({
-		    case e:Throwable => Response(500, Map(), e.getMessage)
-	    })
-			.map(toJson)
-	  	.map(json => builder.nats.publish(msg.getReplyTo, json))
-	}
-
-	private def event(func:(Request)=>Future[Unit]):MessageHandler = { msg =>
-		val req = fromJson[Request](msg.getData)
-		func(req)
-	}
-
-	private def raw(func:(Message)=>Future[Unit]):MessageHandler = { msg =>
-		func(msg)
-	}
-
-	private def rawResponse(func:(Message)=>Future[Message]):MessageHandler = { msg =>
-		func(msg)
-	  	.foreach(msg => builder.nats.publish(msg.getSubject, msg.getData))
+	def apply(func:(Message)=>Message)(implicit ec:ExecutionContext):Worker = {
+		(msg:Message) => Future(func(msg))
 	}
 }
 
-case class Subscription(topic:String, dispatcher:Dispatcher)
+object Eventer {
+	def apply(func:(Message)=>Unit):Eventer = {
+		(msg:Message) => func(msg)
+	}
+}
+
+case class Settings(queue:Boolean, name:String)

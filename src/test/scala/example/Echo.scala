@@ -1,25 +1,21 @@
 package example
 
-import se.chimps.rpc.{Request, Response, RpcBuilder}
+import se.chimps.rpc.providers.nats.NatsServer
+import se.chimps.rpc.{Message, MessageBuilder, Worker}
 
-import scala.concurrent.ExecutionContext.global
-import scala.sys.ShutdownHookThread
+import scala.concurrent.ExecutionContext.Implicits.global
 
 object Echo {
+
+	val echo = Worker({ msg:Message =>
+		MessageBuilder.newSuccess()
+	  	.withPlainBody(msg.body)
+	})
+
 	def main(args:Array[String]): Unit = {
-		val rpc = RpcBuilder.nats()
-	  	.worker("echo", echo)(global)
-			.build(global)
-
-		ShutdownHookThread {
-			rpc.stop()
-		}
-
-		println("Running...")
-		rpc.start()
+		val server = NatsServer()
+		server.registerWorker("echo", echo)
+		server.start()
 	}
 
-	def echo(req:Request):Response = {
-		Response(200, Map("Content-Type" -> "text/plain"), req.body)
-	}
 }
