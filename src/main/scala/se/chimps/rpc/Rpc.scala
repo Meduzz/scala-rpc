@@ -1,19 +1,51 @@
 package se.chimps.rpc
 
+import java.util.concurrent.TimeUnit
+
+import io.nats.client.{Connection, Dispatcher, Message => Msg}
 import se.chimps.rpc.util.JsonUtil
 
 import scala.concurrent.{ExecutionContext, Future}
+import io.nats.client.Implicits._
 
-trait RpcServer {
-	def registerWorker(topic:String, func:Worker)
-	def registerEventer(topic:String, func:Eventer)
-	def start(opts:Option[Settings] = None)
-	def stop()
+import scala.concurrent.duration.Duration
+
+class RPC(conn:Connection) {
+	private var subz:Map[String, Dispatcher] = Map()
+
+	def request(to:String, message: Message, timeout:Int)(implicit ec:ExecutionContext):Future[Message] = {
+		asConn(conn).request(to, JsonUtil.stringify(message), "utf-8")(ec, Duration(timeout.toLong, TimeUnit.SECONDS))
+  		.map(msg => JsonUtil.parse[Message](new String(msg.getData, "utf-8")))
+	}
+
+	def trigger(to:String, message: Message):Unit = {
+		asConn(conn).publish(to, JsonUtil.stringify(message), "utf-8")
+	}
+
+	def handler(topic:String, queue:Option[String], handler: Handler):Unit = {
+		val dispatcher = queue match {
+			case Some(q) => asConn(conn).subscribe(topic, q, wrap(handler))
+			case None => asConn(conn).subscribe(topic, wrap(handler))
+		}
+
+		subz = subz ++ Map(topic -> dispatcher)
+	}
+
+	def remove(topic:String):Unit = {
+		subz.get(topic) match {
+			case Some(d) => d.unsubscribe(topic)
+			case None =>
+		}
+	}
+
+	private def wrap(handler:Handler):(Msg => Unit) = { msg =>
+		val ctx = new NatsContext(conn, msg)
+		handler(ctx)
+	}
 }
 
-trait RpcClient {
-	def request(topic:String, msg:Message):Future[Message]
-	def trigger(topic:String, msg:Message):Unit
+object RPC {
+	def apply(conn:Connection):RPC = new RPC(conn)
 }
 
 case class Message(metadata:Map[String, String], body:String) {
@@ -31,23 +63,27 @@ object MessageBuilder {
 
 case class ErrorDTO(msg:String)
 
-trait Worker extends (Message => Future[Message])
-trait Eventer extends (Message => Unit)
-
-object Worker {
-	def apply(func:(Message)=>Future[Message]):Worker = {
-		(msg:Message) => func(msg)
-	}
-
-	def apply(func:(Message)=>Message)(implicit ec:ExecutionContext):Worker = {
-		(msg:Message) => Future(func(msg))
-	}
+trait Context {
+	def body():Message
+	def reply(message: Message):Unit
+	def forward(to:String, message: Message):Unit
+	def trigger(to:String, message:Message):Unit
+	def request(to:String, message: Message, timeout:Int)(implicit ec:ExecutionContext):Future[Message]
 }
 
-object Eventer {
-	def apply(func:(Message)=>Unit):Eventer = {
-		(msg:Message) => func(msg)
+trait Handler extends (Context => Unit)
+
+class NatsContext(val conn:Connection, msg:Msg) extends Context {
+	override def body():Message = JsonUtil.parse[Message](new String(msg.getData, "utf-8"))
+
+	override def reply(message:Message):Unit = asConn(conn).publish(msg.getReplyTo, JsonUtil.stringify(message), "utf-8")
+
+	override def forward(to:String, message:Message):Unit = asConn(conn).publish(to, JsonUtil.stringify(message), "utf-8")
+
+	override def trigger(to:String, message:Message):Unit = asConn(conn).publish(to, JsonUtil.stringify(message), "utf-8")
+
+	override def request(to:String, message:Message, timeout:Int)(implicit ec:ExecutionContext):Future[Message] = {
+		asConn(conn).request(to, JsonUtil.stringify(message), "utf-8")(ec, Duration(timeout.toLong, TimeUnit.SECONDS))
+  		.map(rep => JsonUtil.parse[Message](new String(rep.getData, "utf-8")))
 	}
 }
-
-case class Settings(queue:Boolean, name:String)

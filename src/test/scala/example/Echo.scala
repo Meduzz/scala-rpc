@@ -1,21 +1,25 @@
 package example
 
-import se.chimps.rpc.providers.nats.NatsServer
-import se.chimps.rpc.{Message, MessageBuilder, Worker}
-
-import scala.concurrent.ExecutionContext.Implicits.global
+import io.nats.client.Nats
+import se.chimps.rpc
+import se.chimps.rpc.{Context, Handler, MessageBuilder}
 
 object Echo {
 
-	val echo = Worker({ msg:Message =>
-		MessageBuilder.newSuccess()
+	val echo:Handler = { ctx:Context =>
+		val msg = ctx.body()
+
+		val reply = MessageBuilder.newSuccess()
 	  	.withPlainBody(msg.body)
-	})
+
+		ctx.reply(reply)
+	}
 
 	def main(args:Array[String]): Unit = {
-		val server = NatsServer()
-		server.registerWorker("echo", echo)
-		server.start()
+		val conn = Nats.connect()
+
+		val server = rpc.RPC(conn)
+		server.handler("echo", None, echo)
 	}
 
 }
